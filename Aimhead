@@ -1,0 +1,1383 @@
+--========================================================--
+--              AIM ASSIST - ROBLOX / LUAU               --
+--       Dùng cho game do bạn tự phát triển              --
+--========================================================--
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+
+--========================================================--
+--                         CONFIG                         --
+--========================================================--
+
+local CONFIG = {
+	AIM_ENABLED = false,
+
+	FOV = 120,
+	SMOOTHNESS = 0.15,
+	MAX_DISTANCE = 500,
+
+	TARGET_PART = "Head",
+
+	HOLD_TO_AIM = true,
+	REQUIRE_LINE_OF_SIGHT = true,
+
+	UPDATE_RATE = 1 / 30,
+}
+
+
+--========================================================--
+--                       STATE                           --
+--========================================================--
+
+local CurrentTarget = nil
+local IsAiming = false
+local Accumulator = 0
+local Destroyed = false
+
+
+--========================================================--
+--                  CHARACTER CHECK                      --
+--========================================================--
+
+local function IsAlive(character)
+
+	if not character then
+		return false
+	end
+
+	local humanoid =
+		character:FindFirstChildOfClass("Humanoid")
+
+	return humanoid
+		and humanoid.Health > 0
+end
+
+
+--========================================================--
+--                    TARGET PART                        --
+--========================================================--
+
+local function GetTargetPart(character)
+
+	if not character then
+		return nil
+	end
+
+	return character:FindFirstChild(
+		CONFIG.TARGET_PART
+	)
+end
+
+
+--========================================================--
+--                  DISTANCE CHECK                       --
+--========================================================--
+
+local function IsWithinDistance(part)
+
+	if not part then
+		return false
+	end
+
+	local distance =
+		(Camera.CFrame.Position - part.Position).Magnitude
+
+	return distance <= CONFIG.MAX_DISTANCE
+end
+
+
+--========================================================--
+--                     FOV CHECK                         --
+--========================================================--
+
+local function IsInsideFOV(part)
+
+	if not part then
+		return false
+	end
+
+	local screenPosition, visible =
+		Camera:WorldToViewportPoint(
+			part.Position
+		)
+
+	if not visible or screenPosition.Z <= 0 then
+		return false
+	end
+
+	local center =
+		Vector2.new(
+			Camera.ViewportSize.X / 2,
+			Camera.ViewportSize.Y / 2
+		)
+
+	local targetPosition =
+		Vector2.new(
+			screenPosition.X,
+			screenPosition.Y
+		)
+
+	return (
+		targetPosition - center
+	).Magnitude <= CONFIG.FOV
+end
+
+
+--========================================================--
+--                  LINE OF SIGHT                        --
+--========================================================--
+
+local function HasLineOfSight(part)
+
+	if not CONFIG.REQUIRE_LINE_OF_SIGHT then
+		return true
+	end
+
+	if not part then
+		return false
+	end
+
+	local character =
+		LocalPlayer.Character
+
+	if not character then
+		return false
+	end
+
+	local origin =
+		Camera.CFrame.Position
+
+	local direction =
+		part.Position - origin
+
+	local params =
+		RaycastParams.new()
+
+	params.FilterType =
+		Enum.RaycastFilterType.Exclude
+
+	params.FilterDescendantsInstances = {
+		character
+	}
+
+	params.IgnoreWater = true
+
+	local result =
+		workspace:Raycast(
+			origin,
+			direction,
+			params
+		)
+
+	if not result then
+		return true
+	end
+
+	return result.Instance:IsDescendantOf(
+		part.Parent
+	)
+end
+
+
+--========================================================--
+--                 VALID TARGET CHECK                    --
+--========================================================--
+
+local function IsValidTarget(player)
+
+	if not player then
+		return false
+	end
+
+	if player == LocalPlayer then
+		return false
+	end
+
+	local character =
+		player.Character
+
+	if not IsAlive(character) then
+		return false
+	end
+
+	local part =
+		GetTargetPart(character)
+
+	if not part then
+		return false
+	end
+
+	if not IsWithinDistance(part) then
+		return false
+	end
+
+	if not IsInsideFOV(part) then
+		return false
+	end
+
+	if not HasLineOfSight(part) then
+		return false
+	end
+
+	return true
+end
+
+
+--========================================================--
+--                  FIND BEST TARGET                     --
+--========================================================--
+
+local function GetBestTarget()
+
+	local bestTarget = nil
+	local bestScore = math.huge
+
+	local center =
+		Vector2.new(
+			Camera.ViewportSize.X / 2,
+			Camera.ViewportSize.Y / 2
+		)
+
+	for _, player in ipairs(
+		Players:GetPlayers()
+	) do
+
+		if IsValidTarget(player) then
+
+			local character =
+				player.Character
+
+			local part =
+				GetTargetPart(character)
+
+			if part then
+
+				local screenPosition =
+					Camera:WorldToViewportPoint(
+						part.Position
+					)
+
+				local screenPoint =
+					Vector2.new(
+						screenPosition.X,
+						screenPosition.Y
+					)
+
+				local screenDistance =
+					(screenPoint - center).Magnitude
+
+				local worldDistance =
+					(Camera.CFrame.Position -
+						part.Position).Magnitude
+
+				local score =
+					screenDistance +
+					worldDistance * 0.001
+
+				if score < bestScore then
+					bestScore = score
+					bestTarget = part
+				end
+			end
+		end
+	end
+
+	return bestTarget
+end
+
+
+--========================================================--
+--             CURRENT TARGET VALIDATION                 --
+--========================================================--
+
+local function IsCurrentTargetValid()
+
+	if not CurrentTarget then
+		return false
+	end
+
+	local character =
+		CurrentTarget.Parent
+
+	if not character then
+		return false
+	end
+
+	if not IsAlive(character) then
+		return false
+	end
+
+	if not IsWithinDistance(
+		CurrentTarget
+	) then
+		return false
+	end
+
+	if not IsInsideFOV(
+		CurrentTarget
+	) then
+		return false
+	end
+
+	if not HasLineOfSight(
+		CurrentTarget
+	) then
+		return false
+	end
+
+	return true
+end
+
+
+--========================================================--
+--                       AIM                            --
+--========================================================--
+
+local function AimAtTarget(part)
+
+	if not part then
+		return
+	end
+
+	local desired =
+		CFrame.lookAt(
+			Camera.CFrame.Position,
+			part.Position
+		)
+
+	local smooth =
+		math.clamp(
+			CONFIG.SMOOTHNESS,
+			0.01,
+			1
+		)
+
+	Camera.CFrame =
+		Camera.CFrame:Lerp(
+			desired,
+			smooth
+		)
+end
+
+
+--========================================================--
+--                  INPUT SYSTEM                         --
+--========================================================--
+
+UserInputService.InputBegan:Connect(
+	function(input, processed)
+
+		if processed then
+			return
+		end
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton2 then
+
+			IsAiming = true
+		end
+	end
+)
+
+
+UserInputService.InputEnded:Connect(
+	function(input)
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton2 then
+
+			IsAiming = false
+		end
+	end
+)
+
+
+local function CanAim()
+
+	if not CONFIG.AIM_ENABLED then
+		return false
+	end
+
+	if CONFIG.HOLD_TO_AIM then
+		return IsAiming
+	end
+
+	return true
+end
+
+
+--========================================================--
+--                   FOV CIRCLE                         --
+--========================================================--
+
+local FOVCircle =
+	Instance.new("Frame")
+
+FOVCircle.Name = "FOVCircle"
+
+FOVCircle.AnchorPoint =
+	Vector2.new(0.5, 0.5)
+
+FOVCircle.BackgroundTransparency = 1
+
+FOVCircle.BorderSizePixel = 0
+
+FOVCircle.Parent = nil
+
+
+local CircleCorner =
+	Instance.new("UICorner")
+
+CircleCorner.CornerRadius =
+	UDim.new(1, 0)
+
+CircleCorner.Parent = FOVCircle
+
+
+local CircleStroke =
+	Instance.new("UIStroke")
+
+CircleStroke.Thickness = 1.5
+CircleStroke.Transparency = 0.15
+CircleStroke.Color =
+	Color3.fromRGB(80, 220, 120)
+
+CircleStroke.Parent = FOVCircle
+
+
+--========================================================--
+--                        UI                            --
+--========================================================--
+
+local ScreenGui =
+	Instance.new("ScreenGui")
+
+ScreenGui.Name =
+	"AimAssistUI"
+
+ScreenGui.ResetOnSpawn = false
+
+ScreenGui.Parent =
+	LocalPlayer:WaitForChild(
+		"PlayerGui"
+	)
+
+
+FOVCircle.Parent = ScreenGui
+
+
+local Main =
+	Instance.new("Frame")
+
+Main.Size =
+	UDim2.new(0, 310, 0, 390)
+
+Main.Position =
+	UDim2.new(
+		0.5,
+		-155,
+		0.5,
+		-195
+	)
+
+Main.BackgroundColor3 =
+	Color3.fromRGB(24, 24, 30)
+
+Main.BorderSizePixel = 0
+
+Main.Parent = ScreenGui
+
+
+local MainCorner =
+	Instance.new("UICorner")
+
+MainCorner.CornerRadius =
+	UDim.new(0, 12)
+
+MainCorner.Parent = Main
+
+
+--========================================================--
+--                       TITLE                           --
+--========================================================--
+
+local Title =
+	Instance.new("TextLabel")
+
+Title.Size =
+	UDim2.new(1, -55, 0, 45)
+
+Title.Position =
+	UDim2.new(0, 15, 0, 0)
+
+Title.BackgroundTransparency = 1
+
+Title.Text =
+	"AIM ASSIST"
+
+Title.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+Title.TextSize = 19
+
+Title.Font =
+	Enum.Font.GothamBold
+
+Title.TextXAlignment =
+	Enum.TextXAlignment.Left
+
+Title.Parent = Main
+
+
+--========================================================--
+--                    MINIMIZE                          --
+--========================================================--
+
+local Minimize =
+	Instance.new("TextButton")
+
+Minimize.Size =
+	UDim2.new(0, 35, 0, 35)
+
+Minimize.Position =
+	UDim2.new(1, -42, 0, 5)
+
+Minimize.BackgroundTransparency = 1
+
+Minimize.Text = "−"
+
+Minimize.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+Minimize.TextSize = 24
+
+Minimize.Font =
+	Enum.Font.GothamBold
+
+Minimize.Parent = Main
+
+
+--========================================================--
+--                    AIM TOGGLE                        --
+--========================================================--
+
+local Toggle =
+	Instance.new("TextButton")
+
+Toggle.Size =
+	UDim2.new(1, -30, 0, 45)
+
+Toggle.Position =
+	UDim2.new(0, 15, 0, 52)
+
+Toggle.BackgroundColor3 =
+	Color3.fromRGB(70, 70, 75)
+
+Toggle.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+Toggle.TextSize = 15
+
+Toggle.Font =
+	Enum.Font.GothamBold
+
+Toggle.Parent = Main
+
+
+local ToggleCorner =
+	Instance.new("UICorner")
+
+ToggleCorner.CornerRadius =
+	UDim.new(0, 8)
+
+ToggleCorner.Parent = Toggle
+
+
+local function UpdateToggle()
+
+	if CONFIG.AIM_ENABLED then
+
+		Toggle.Text =
+			"● AIM ASSIST : ON"
+
+		Toggle.TextColor3 =
+			Color3.fromRGB(
+				120,
+				255,
+				150
+			)
+
+		Toggle.BackgroundColor3 =
+			Color3.fromRGB(
+				35,
+				120,
+				70
+			)
+
+	else
+
+		Toggle.Text =
+			"● AIM ASSIST : OFF"
+
+		Toggle.TextColor3 =
+			Color3.fromRGB(
+				210,
+				210,
+				210
+			)
+
+		Toggle.BackgroundColor3 =
+			Color3.fromRGB(
+				70,
+				70,
+				75
+			)
+
+	end
+end
+
+
+Toggle.MouseButton1Click:Connect(
+	function()
+
+		CONFIG.AIM_ENABLED =
+			not CONFIG.AIM_ENABLED
+
+		if not CONFIG.AIM_ENABLED then
+			CurrentTarget = nil
+		end
+
+		UpdateToggle()
+	end
+)
+
+
+--========================================================--
+--                     SLIDER                           --
+--========================================================--
+
+local function CreateSlider(
+	name,
+	y,
+	minValue,
+	maxValue,
+	defaultValue,
+	callback
+)
+
+	local label =
+		Instance.new("TextLabel")
+
+	label.Size =
+		UDim2.new(1, -30, 0, 22)
+
+	label.Position =
+		UDim2.new(0, 15, 0, y)
+
+	label.BackgroundTransparency = 1
+
+	label.Text =
+		name .. ": " ..
+		tostring(defaultValue)
+
+	label.TextColor3 =
+		Color3.fromRGB(
+			220,
+			220,
+			220
+		)
+
+	label.TextSize = 13
+
+	label.Font =
+		Enum.Font.Gotham
+
+	label.TextXAlignment =
+		Enum.TextXAlignment.Left
+
+	label.Parent = Main
+
+
+	local bar =
+		Instance.new("TextButton")
+
+	bar.Size =
+		UDim2.new(1, -30, 0, 8)
+
+	bar.Position =
+		UDim2.new(
+			0,
+			15,
+			0,
+			y + 27
+		)
+
+	bar.BackgroundColor3 =
+		Color3.fromRGB(
+			60,
+			60,
+			68
+		)
+
+	bar.BorderSizePixel = 0
+
+	bar.Text = ""
+
+	bar.Parent = Main
+
+
+	local corner =
+		Instance.new("UICorner")
+
+	corner.CornerRadius =
+		UDim.new(1, 0)
+
+	corner.Parent = bar
+
+
+	local dragging = false
+
+
+	local function SetValue(x)
+
+		local alpha =
+			math.clamp(
+				(
+					x -
+					bar.AbsolutePosition.X
+				) /
+				bar.AbsoluteSize.X,
+				0,
+				1
+			)
+
+		local value =
+			minValue +
+			(
+				maxValue -
+				minValue
+			) * alpha
+
+		value =
+			math.floor(
+				value * 100
+			) / 100
+
+		label.Text =
+			name .. ": " ..
+			tostring(value)
+
+		callback(value)
+	end
+
+
+	bar.InputBegan:Connect(
+		function(input)
+
+			if input.UserInputType ==
+				Enum.UserInputType.MouseButton1
+				or input.UserInputType ==
+				Enum.UserInputType.Touch then
+
+				dragging = true
+
+				SetValue(
+					input.Position.X
+				)
+			end
+		end
+	)
+
+
+	UserInputService.InputChanged:Connect(
+		function(input)
+
+			if not dragging then
+				return
+			end
+
+			if input.UserInputType ==
+				Enum.UserInputType.MouseMovement
+				or input.UserInputType ==
+				Enum.UserInputType.Touch then
+
+				SetValue(
+					input.Position.X
+				)
+			end
+		end
+	)
+
+
+	UserInputService.InputEnded:Connect(
+		function(input)
+
+			if input.UserInputType ==
+				Enum.UserInputType.MouseButton1
+				or input.UserInputType ==
+				Enum.UserInputType.Touch then
+
+				dragging = false
+			end
+		end
+	)
+end
+
+
+--========================================================--
+--                       SLIDERS                         --
+--========================================================--
+
+CreateSlider(
+	"FOV",
+	110,
+	30,
+	300,
+	CONFIG.FOV,
+	function(value)
+		CONFIG.FOV = value
+	end
+)
+
+
+CreateSlider(
+	"Smoothness",
+	160,
+	0.01,
+	1,
+	CONFIG.SMOOTHNESS,
+	function(value)
+		CONFIG.SMOOTHNESS = value
+	end
+)
+
+
+CreateSlider(
+	"Max Distance",
+	210,
+	50,
+	2000,
+	CONFIG.MAX_DISTANCE,
+	function(value)
+		CONFIG.MAX_DISTANCE = value
+	end
+)
+
+
+--========================================================--
+--                    TARGET PART                        --
+--========================================================--
+
+local TargetButton =
+	Instance.new("TextButton")
+
+TargetButton.Size =
+	UDim2.new(1, -30, 0, 35)
+
+TargetButton.Position =
+	UDim2.new(0, 15, 0, 265)
+
+TargetButton.BackgroundColor3 =
+	Color3.fromRGB(
+		55,
+		55,
+		65
+	)
+
+TargetButton.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+TargetButton.TextSize = 13
+
+TargetButton.Font =
+	Enum.Font.Gotham
+
+TargetButton.Text =
+	"Target Part: " ..
+	CONFIG.TARGET_PART
+
+TargetButton.Parent = Main
+
+
+local TargetParts = {
+	"Head",
+	"UpperTorso",
+	"HumanoidRootPart"
+}
+
+local TargetIndex = 1
+
+
+TargetButton.MouseButton1Click:Connect(
+	function()
+
+		TargetIndex += 1
+
+		if TargetIndex >
+			#TargetParts then
+
+			TargetIndex = 1
+		end
+
+		CONFIG.TARGET_PART =
+			TargetParts[TargetIndex]
+
+		TargetButton.Text =
+			"Target Part: " ..
+			CONFIG.TARGET_PART
+
+		CurrentTarget = nil
+	end
+)
+
+
+--========================================================--
+--                    HOLD AIM                          --
+--========================================================--
+
+local HoldButton =
+	Instance.new("TextButton")
+
+HoldButton.Size =
+	UDim2.new(
+		0.48,
+		-18,
+		0,
+		35
+	)
+
+HoldButton.Position =
+	UDim2.new(
+		0,
+		15,
+		0,
+		310
+	)
+
+HoldButton.BackgroundColor3 =
+	Color3.fromRGB(
+		55,
+		55,
+		65
+	)
+
+HoldButton.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+HoldButton.TextSize = 12
+
+HoldButton.Font =
+	Enum.Font.Gotham
+
+HoldButton.Text =
+	"Hold Aim: ON"
+
+HoldButton.Parent = Main
+
+
+HoldButton.MouseButton1Click:Connect(
+	function()
+
+		CONFIG.HOLD_TO_AIM =
+			not CONFIG.HOLD_TO_AIM
+
+		HoldButton.Text =
+			"Hold Aim: " ..
+			(
+				CONFIG.HOLD_TO_AIM
+				and "ON"
+				or "OFF"
+			)
+
+		CurrentTarget = nil
+	end
+)
+
+
+--========================================================--
+--                    LOS BUTTON                        --
+--========================================================--
+
+local LOSButton =
+	Instance.new("TextButton")
+
+LOSButton.Size =
+	UDim2.new(
+		0.48,
+		-18,
+		0,
+		35
+	)
+
+LOSButton.Position =
+	UDim2.new(
+		0.52,
+		3,
+		0,
+		310
+	)
+
+LOSButton.BackgroundColor3 =
+	Color3.fromRGB(
+		55,
+		55,
+		65
+	)
+
+LOSButton.TextColor3 =
+	Color3.fromRGB(
+		255,
+		255,
+		255
+	)
+
+LOSButton.TextSize = 12
+
+LOSButton.Font =
+	Enum.Font.Gotham
+
+LOSButton.Text =
+	"Line Of Sight: ON"
+
+LOSButton.Parent = Main
+
+
+LOSButton.MouseButton1Click:Connect(
+	function()
+
+		CONFIG.REQUIRE_LINE_OF_SIGHT =
+			not CONFIG.REQUIRE_LINE_OF_SIGHT
+
+		LOSButton.Text =
+			"Line Of Sight: " ..
+			(
+				CONFIG.REQUIRE_LINE_OF_SIGHT
+				and "ON"
+				or "OFF"
+			)
+
+		CurrentTarget = nil
+	end
+)
+
+
+--========================================================--
+--                     DRAG UI                          --
+--========================================================--
+
+local draggingUI = false
+local dragStart
+local startPosition
+
+
+Title.InputBegan:Connect(
+	function(input)
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton1
+			or input.UserInputType ==
+			Enum.UserInputType.Touch then
+
+			draggingUI = true
+
+			dragStart =
+				input.Position
+
+			startPosition =
+				Main.Position
+		end
+	end
+)
+
+
+UserInputService.InputChanged:Connect(
+	function(input)
+
+		if not draggingUI then
+			return
+		end
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseMovement
+			or input.UserInputType ==
+			Enum.UserInputType.Touch then
+
+			local delta =
+				input.Position -
+				dragStart
+
+			Main.Position =
+				UDim2.new(
+					startPosition.X.Scale,
+					startPosition.X.Offset +
+						delta.X,
+
+					startPosition.Y.Scale,
+					startPosition.Y.Offset +
+						delta.Y
+				)
+		end
+	end
+)
+
+
+UserInputService.InputEnded:Connect(
+	function(input)
+
+		if input.UserInputType ==
+			Enum.UserInputType.MouseButton1
+			or input.UserInputType ==
+			Enum.UserInputType.Touch then
+
+			draggingUI = false
+		end
+	end
+)
+
+
+--========================================================--
+--                    MINIMIZE                          --
+--========================================================--
+
+local Minimized = false
+
+
+Minimize.MouseButton1Click:Connect(
+	function()
+
+		Minimized =
+			not Minimized
+
+		if Minimized then
+
+			Main.Size =
+				UDim2.new(
+					0,
+					310,
+					0,
+					45
+				)
+
+			Minimize.Text = "+"
+
+			for _, object in
+				ipairs(Main:GetChildren()) do
+
+				if object ~= Title
+					and object ~= Minimize
+					and object ~= MainCorner then
+
+					object.Visible = false
+				end
+			end
+
+		else
+
+			Main.Size =
+				UDim2.new(
+					0,
+					310,
+					0,
+					390
+				)
+
+			Minimize.Text = "−"
+
+			for _, object in
+				ipairs(Main:GetChildren()) do
+
+				object.Visible = true
+			end
+		end
+	end
+)
+
+
+--========================================================--
+--                    FOV UPDATE                        --
+--========================================================--
+
+local function UpdateFOVCircle()
+
+	local diameter =
+		CONFIG.FOV * 2
+
+	FOVCircle.Size =
+		UDim2.new(
+			0,
+			diameter,
+			0,
+			diameter
+		)
+
+	FOVCircle.Position =
+		UDim2.new(
+			0.5,
+			0,
+			0.5,
+			0
+		)
+
+	FOVCircle.Visible =
+		CONFIG.AIM_ENABLED
+end
+
+
+--========================================================--
+--                    AIM LOOP                          --
+--========================================================--
+
+local AimConnection
+
+AimConnection =
+	RunService.RenderStepped:Connect(
+		function(deltaTime)
+
+			if Destroyed then
+				return
+			end
+
+			UpdateFOVCircle()
+
+			if not CanAim() then
+
+				CurrentTarget = nil
+
+				return
+			end
+
+			Accumulator += deltaTime
+
+			if Accumulator <
+				CONFIG.UPDATE_RATE then
+
+				return
+			end
+
+			Accumulator = 0
+
+			-- Giữ mục tiêu hiện tại
+			-- nếu nó vẫn hợp lệ.
+			if CurrentTarget then
+
+				if not
+					IsCurrentTargetValid() then
+
+					CurrentTarget = nil
+				end
+			end
+
+			-- Chỉ tìm mục tiêu mới
+			-- khi mục tiêu cũ không còn hợp lệ.
+			if not CurrentTarget then
+
+				CurrentTarget =
+					GetBestTarget()
+			end
+
+			if CurrentTarget then
+
+				AimAtTarget(
+					CurrentTarget
+				)
+			end
+		end
+	)
+
+
+--========================================================--
+--                  PLAYER CLEANUP                       --
+--========================================================--
+
+Players.PlayerRemoving:Connect(
+	function(player)
+
+		if not CurrentTarget then
+			return
+		end
+
+		if player.Character
+			and CurrentTarget:IsDescendantOf(
+				player.Character
+			) then
+
+			CurrentTarget = nil
+		end
+	end
+)
+
+
+--========================================================--
+--                  CHARACTER RESET                      --
+--========================================================--
+
+LocalPlayer.CharacterRemoving:Connect(
+	function()
+
+		CurrentTarget = nil
+		IsAiming = false
+	end
+)
+
+
+--========================================================--
+--                     CLEANUP                           --
+--========================================================--
+
+script.Destroying:Connect(
+	function()
+
+		Destroyed = true
+
+		if AimConnection then
+
+			AimConnection:Disconnect()
+
+			AimConnection = nil
+		end
+
+		CurrentTarget = nil
+
+		if ScreenGui then
+			ScreenGui:Destroy()
+		end
+	end
+)
+
+
+--========================================================--
+--                       START                           --
+--========================================================--
+
+UpdateToggle()
+UpdateFOVCircle()
+
+print(
+	"[AimAssist] System loaded successfully."
+)
